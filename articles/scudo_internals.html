@@ -370,9 +370,9 @@ Here is a table for the first 6 regions:
 
 <span id="a3_2_1"></span>----[ 3.2.1 - Checking for orphans first
 
-After deciding which region can service the request, scudo will check the
-cache of the allocator for any available free blocks in the specified region
-before attempting to map more space to the heap.
+When it has been figured out which region shall service the request, the
+cache of the allocator will be checked for any available free blocks in 
+the specified region before attempting to map more space for the heap.
 
 ---------------------------------- local_cache.h ----------------------------------
 
