@@ -25,27 +25,27 @@
 ~ Scudo's Internals ~
 
 --[ Table of contents
-    <span style="color:#e90e0e">1</span> - Introduction
-    <span style="color:#e90e0e">2</span> - Overview
-    <span style="color:#e90e0e">3</span> - Primary Allocator
-    <span style="color:#e90e0e">3.1</span> - The birth of the heap.
-    <span style="color:#e90e0e">3.2</span> - The birth of a block.
-    <span style="color:#e90e0e">3.2.1</span> - Checking for orphans first
-    <span style="color:#e90e0e">3.2.2</span> - Orphanage is empty
-    <span style="color:#e90e0e">3.2.3</span> - Integrity checks on the header.
-    <span style="color:#e90e0e">3.3</span> - The death of a block.
-    <span style="color:#e90e0e">4</span> - Quarantine
-    <span style="color:#e90e0e">4.1</span> - Usefull classes
-    <span style="color:#e90e0e">4.2</span> - Phase 1, the entrance
-    <span style="color:#e90e0e">4.3</span> - Phase 2, the escape
-    <span style="color:#e90e0e">5</span> - Conclusions
-    <span style="color:#e90e0e">6</span> - Useful links
+    <a href="#a1"><span style="color:#e90e0e">1</span></a> - Introduction
+    <a href="#a2"><span style="color:#e90e0e">2</span></a> - Overview
+    <a href="#a3"><span style="color:#e90e0e">3</span></a> - Primary Allocator
+    <a href="#a3_1"><span style="color:#e90e0e">3.1</span></a> - The birth of the heap.
+    <a href="#a3_2"><span style="color:#e90e0e">3.2</span></a> - The birth of a block.
+    <a href="#a3_2_1"><span style="color:#e90e0e">3.2.1</span></a> - Checking for orphans first
+    <a href="#a3_2_2"><span style="color:#e90e0e">3.2.2</span></a> - Orphanage is empty
+    <a href="#a3_2_3"><span style="color:#e90e0e">3.2.3</span></a> - Integrity checks on the header.
+    <a href="#a3_3"><span style="color:#e90e0e">3.3</span></a> - The death of a block.
+    <a href="#a4"><span style="color:#e90e0e">4</span></a> - Quarantine
+    <a href="#a4_1"><span style="color:#e90e0e">4.1</span></a> - Usefull classes
+    <a href="#a4_2"><span style="color:#e90e0e">4.2</span></a> - Phase 1, the entrance
+    <a href="#a4_3"><span style="color:#e90e0e">4.3</span></a> - Phase 2, the escape
+    <a href="#a5"><span style="color:#e90e0e">5</span></a> - Conclusions
+    <a href="#a6"><span style="color:#e90e0e">6</span></a> - Useful links
 
 ~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~
 
 <center><div style="display: inline-block; text-align: left;"><pre>
 
---[ 1 - Introduction
+<span id="a1"></span>--[ 1 - Introduction
 
 In this blog post we publish our research on the scudo allocator. There are
 some other blogs which detail some parts of the scudo, but we couldn't
@@ -66,7 +66,7 @@ In this research we only experimented with the standalone scudo deployed on a
 64 bit linux platform, but the core properties of scudo are somewhat consistent
 between different platforms.
 
---[ 2 - Overview
+<span id="a2"></span>--[ 2 - Overview
 
 Scudo is really two things, the Primary Allocator and the Secondary allocator.
 ~ The primary allocator is responsible for smaller allocation needs of a process.
@@ -95,7 +95,7 @@ harder to exploit.
 
 Scudo is implemented in C++, and it's designed to support many configurations.
 
---[ 3 - Primary Allocator
+<span id="a3"></span>--[ 3 - Primary Allocator
 
 It's always good to read what the documentation [<a href=https://llvm.org/docs/ScudoHardenedAllocator.html target="_blank">1</a>] has to say:
 
@@ -120,7 +120,7 @@ This is a high level overview of how the heap is structured in scudo.
 The first region in the heap layout is reserved for internal use from the
 allocator. The program can not allocate space on that region for storing data.
 
----[ 3.1 - The birth of the heap.
+<span id="a3_1"></span>---[ 3.1 - The birth of the heap.
 
 Depending how scudo is bundled with the standard libc/c++ library on a given
 platform, scudo might be initialized either during startup or during the first
@@ -293,7 +293,7 @@ heap overflows might be prevented in some cases.
 
         Total size of the heap = NumClassess * 4GB
 
----[ 3.2 - The birth of a block.
+<span id="a3_2"></span>---[ 3.2 - The birth of a block.
 
 Continuing our journey from our hypothetical malloc call, after the initialization
 of the heap, scudo is ready to service our request by allocating some space for us.
@@ -368,7 +368,7 @@ Here is a table for the first 6 regions:
   |    112   |     6     |
   +----------------------+
 
-----[ 3.2.1 - Checking for orphans first
+<span id="a3_2_1"></span>----[ 3.2.1 - Checking for orphans first
 
 After deciding which region can service the request, scudo will check the
 cache of the allocator for any available free blocks in the specified region
@@ -518,7 +518,7 @@ TransferBatch *popBatch(CacheT *C, uptr ClassId) {
 After popping a TransferBatch scudo will simply copy its contents to the
 cache by calling memcpy to speed up the "transfering".
 
-----[ 3.2.2 - Orphanage is empty
+<span id="a3_2_2"></span>----[ 3.2.2 - Orphanage is empty
 
 If both the PerClass entry & FreeList for that region are empty,
 scudo will allocate some transfer batches for the FreeList by calling
@@ -661,7 +661,7 @@ special Region, with a ClassId = 0. The program can not allocate blocks in
 that region directly by calling malloc with a specific size. But as you can
 see above there is no need for shuffling the transfer batches in Region 0.
 
-----[ 3.2.3 - Integrity checks on the header.
+<span id="a3_2_3"></span>----[ 3.2.3 - Integrity checks on the header.
 
 The last step for our malloc() before returning a block back to the program
 is to prepend a header for tracking some minimal information for the block.
@@ -722,7 +722,7 @@ By leaking both the heap address and the header of a block an attacker can
 produce a cookie collision which is enough to produce his own valid
 checksums.
 
----[ 3.3 - The death of a block.
+<span id="a3_3"></span>---[ 3.3 - The death of a block.
 
 Once the program is done with a block of memory it will call free() on it
 to release the allocated memory.
@@ -833,7 +833,7 @@ If the cache is full, scudo needs to transfer the current contents of the
 PerClass entry to the FreeList by creating a TransferBatch. This will take
 place in drain().
 
---[ 4 - Quarantine
+<span id="a4"></span>--[ 4 - Quarantine
 
 Let's see what the official documentation has to say:
 
@@ -894,7 +894,7 @@ QuarantineCache contents;
   every QuarantineBatch that is linked in the List.
 
 
----[ 4.2 - Phase 1, the entrance
+<span id="a4_2"></span>---[ 4.2 - Phase 1, the entrance
 
 When calling free() API, quarantineOrDeallocateChunk() method will
 be called internally, which will firstly do some checks if it should
@@ -968,7 +968,7 @@ of the QuarantineCache object.
 On the other hand, it will just be stored in the *Batch[] of the last List
 node and update the Count & Size of the object.
 
----[ 4.3 - Phase 2, the escape
+<span id="a4_3"></span>---[ 4.3 - Phase 2, the escape
 
 In order for the quarantined chunks to escape back to reality
 some criteria have to be met.
@@ -1047,14 +1047,14 @@ that exist in Tmp's List in random order.
 So the ones that get extracted in the while loop, will be the ones to
 escape quarantine.
 
---[ 5 - Conclusion
+<span id="a5"></span>--[ 5 - Conclusion
 
 We must agree that Scudo does a decent job at making exploitation harder,
 But all these new things can be a target too, right?
 Thank you for reading. Please reach us out if you found any mistakes/typos
 in this article, it will be much appreciated!
 
---[ 6 - Useful links
+<span id="a6"></span>--[ 6 - Useful links
 
 [<a href=https://llvm.org/docs/ScudoHardenedAllocator.html target="_blank">https://llvm.org/docs/ScudoHardenedAllocator.html</a>]
 [<a href=https://blog.infosectcbr.com.au/2020/04/breaking-secure-checksums-in-scudo_8.html target="_blank">https://blog.infosectcbr.com.au/2020/04/breaking-secure-checksums-in-scudo_8.html</a>]

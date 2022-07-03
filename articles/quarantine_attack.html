@@ -25,28 +25,28 @@
     ~ Attacking Scudo's Quarantine ~
 
     --[ Table of contents
-      <span style="color:#e90e0e">1</span> - Set up
-      <span style="color:#e90e0e">2</span> - Double Return Attack
-      <span style="color:#e90e0e">2.1</span> - Theory
-      <span style="color:#e90e0e">2.2</span> - Practice
-      <span style="color:#e90e0e">3</span> - Write Where Ptr
-      <span style="color:#e90e0e">3.1</span> - Theory
-      <span style="color:#e90e0e">3.2</span> - Practice
-      <span style="color:#e90e0e">4</span> - Un-Quarantine faster
-      <span style="color:#e90e0e">5</span> - Conclusion
+      <a href="#a1"><span style="color:#e90e0e">1</span></a> - Set up
+      <a href="#a2"></a><span style="color:#e90e0e">2</span></a> - Double Return Attack
+      <a href="#a2_1"><span style="color:#e90e0e">2.1</span></a> - Theory
+      <a href="#a2_2"><span style="color:#e90e0e">2.2</span></a> - Practice
+      <a href="#a3"><span style="color:#e90e0e">3</span></a> - Write Where Ptr
+      <a href="#a3_1"><span style="color:#e90e0e">3.1</span></a> - Theory
+      <a href="#a3_2"><span style="color:#e90e0e">3.2</span></a> - Practice
+      <a href="#a4"><span style="color:#e90e0e">4</span></a> - Un-Quarantine faster
+      <a href="#a5"><span style="color:#e90e0e">5</span></a> - Conclusion
     ~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~
 
 <center><div style="display: inline-block; text-align: left;"><pre>
 
-    --[ 1 - Set up
+    <span id="a1"></span>--[ 1 - Set up
     We enable Quarantine with the following environment variable:
     SCUDO_OPTIONS="thread_local_quarantine_size_kb=64:quarantine_size_kb=256:quarantine_max_chunk_size=2048"
 
-    --[ 2 - Double Return Attack
+    <span id="a2"></span>--[ 2 - Double Return Attack
     This technique will allow an attacker to escalate some primitives to make
     the allocator return the same chunk twice.
 
-    ---[ 2.1 - Theory
+    <span id="a2_1"></span>---[ 2.1 - Theory
     It relies on the fact that QuaranineBatch structures get returned directly
     to the backend when deallocated and their contents aren't initialized.
 
@@ -128,7 +128,7 @@
 
     The above is the state of the QuarantineBatches linked list before it will merge Qbatch_1 & Qbatch_2.
 
-    ---[ 2.2 - Practice
+    <span id="a2_2"></span>---[ 2.2 - Practice
 
     Here I will drop a small commented POC for this technique.
 
@@ -249,11 +249,11 @@
     The PoC demonstrating the technique above can be found [<a href=https://github.com/un1fuzz/scudo_research/blob/main/quarantine_double_return.c target="_blank">here</a>]
 
 
-    --[ 3 - Write Where Ptr
+    <span id="a3"></span>--[ 3 - Write Where Ptr
 
     With this technique you can make scudo return arbitrary blocks back to the process.
 
-    ---[ 3.1 Theory
+    <span id="a3_1"></span>---[ 3.1 Theory
 
     When trying to quarantine a chunk, Quarantine.put() will be called.
     And this is where the fun begins.
@@ -480,7 +480,7 @@
 
     The PoC demonstrating the technique above can be found [<a href=https://github.com/un1fuzz/scudo_research/tree/main/quarantine_arbitrary_return target="_blank">here</a>].
 
-    -[ 4 - Un-Quarantine faster
+    <span id="a4"></span>-[ 4 - Un-Quarantine faster
 
     This is a fan trick that may help you. It was used in the Double-Return
     technique.
@@ -513,7 +513,7 @@
 
     The PoC demonstrating the technique above can be found [<a href=https://github.com/un1fuzz/scudo_research/blob/main/fast_unquarantine.c target="_blank">here</a>].
 
-    -[ 5 - Conclusion
+    <span id="a5"></span>-[ 5 - Conclusion
 
     Attacking Quarantine was pretty interesting and we are sure someone
     can come up with many more techniques since we didn't really dive into
