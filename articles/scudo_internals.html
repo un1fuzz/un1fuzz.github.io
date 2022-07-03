@@ -1,0 +1,1061 @@
+<html>
+<head>
+<link rel="icon" href="icon.png">
+<title> un1fuzz ~</title>
+<meta charset="utf-8">
+<style>
+    body {
+      color: #FEFEFE;
+      background-color: #0c0d04;
+      margin: 0 auto;
+      padding: 1em 0 1em 0;
+    }
+@font-face { font-family: "gohu"; src: url("../gohu.woff") format('woff'); }
+       pre { font-family: "gohu", "Lucida Console", monospace, Monaco; font-size: 19px; line-height: 1.0; }
+         a { color: #93ffd7; text-decoration: none; }
+</style>
+</head>
+<body>
+<center><div style="display: inline-block; text-align: center;"><pre>
+
+<a href="../index.html">[Main]</a> <a href="../articles.html">[Articles]</a> <a href="../about.html">[About]</a>
+
+<center><div style="display: inline-block; text-align: left;"><pre>
+
+~ Scudo's Internals ~
+
+--[ Table of contents
+    <span style="color:#e90e0e">1</span> - Introduction
+    <span style="color:#e90e0e">2</span> - Overview
+    <span style="color:#e90e0e">3</span> - Primary Allocator
+    <span style="color:#e90e0e">3.1</span> - The birth of the heap.
+    <span style="color:#e90e0e">3.2</span> - The birth of a block.
+    <span style="color:#e90e0e">3.2.1</span> - Checking for orphans first
+    <span style="color:#e90e0e">3.2.2</span> - Orphanage is empty
+    <span style="color:#e90e0e">3.2.3</span> - Integrity checks on the header.
+    <span style="color:#e90e0e">3.3</span> - The death of a block.
+    <span style="color:#e90e0e">4</span> - Quarantine
+    <span style="color:#e90e0e">4.1</span> - Usefull classes
+    <span style="color:#e90e0e">4.2</span> - Phase 1, the entrance
+    <span style="color:#e90e0e">4.3</span> - Phase 2, the escape
+    <span style="color:#e90e0e">5</span> - Conclusions
+    <span style="color:#e90e0e">6</span> - Useful links
+
+~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~.~
+
+<center><div style="display: inline-block; text-align: left;"><pre>
+
+--[ 1 - Introduction
+
+In this blog post we publish our research on the scudo allocator. There are
+some other blogs which detail some parts of the scudo, but we couldn't
+find any good resource in english so here we are.
+
+We hope that our article will be useful for future researchers who are
+interested on this allocator.
+
+Scudo is already deployed on Android 11 and Fuchsia as a replacement for their
+userland memory allocators, but it's developed as a part of LLVM and can be used
+on most operating systems. As described in the LLVM docs, scudo's design aims to
+mitigate a lot of heap related exploitable situations while maintaining good
+performance. It's not designed to completely protect the heap from any sort of
+attack but it does a decent job to mitigate a lot of heap related exploitable
+situations.
+
+In this research we only experimented with the standalone scudo deployed on a
+64 bit linux platform, but the core properties of scudo are somewhat consistent
+between different platforms.
+
+--[ 2 - Overview
+
+Scudo is really two things, the Primary Allocator and the Secondary allocator.
+~ The primary allocator is responsible for smaller allocation needs of a process.
+  So for the most part, this is the allocator used by the process.
+~ The secondary allocator on the other hand services the more hungry allocation
+  needs of a process.
+
+There are various concepts that add up in a good heap layout, some of them are:
+
+* Limited footprint of metadata present on the heap. (Only the block headers)
+* Region isolation with guard pages. Each region is guarded from each other
+  with the use of guard pages.
+* Pointer "compression". Keeping references to blocks only as offsets from the
+  start of a region.
+* Heap randomization. Each Region shuffles randomly it's blocks.
+* Integrity checks integrated on the header of each block.
+* Delayed freelists to avoid immediate block reuse, preventing UAFs.
+
+The last bullet refers to a very interesting structure of the scudo allocator,
+the Quarantine. Quarantine is an important addition to scudo and it is
+configurable for different needs both on the platform level and separately
+in the program. This protection is optional in scudo, and the extensive
+usage of it in a program can hurt the performance. Although the usage of
+Quarantine can do a decent job making vulnerabilities like UAFs a lot
+harder to exploit.
+
+Scudo is implemented in C++, and it's designed to support many configurations.
+
+--[ 3 - Primary Allocator
+
+It's always good to read what the documentation [<a href=https://llvm.org/docs/ScudoHardenedAllocator.html target="_blank">1</a>] has to say:
+
+"the Primary allocator: fast and efficient, it services smaller allocation
+sizes by carving reserved memory regions into blocks of identical size. There
+are currently two Primary allocators implemented, specific to 32 and 64 bit
+architectures."
+
+  +++++++++++++++++++++++
+  |      Region 0       | <-- Region 0 is only used for allocating TransferBatches.
+  +++++++++++++++++++++++
+  |      Region 1       | <-- ClassId = 1
+  +++++++++++++++++++++++
+  |      Region 2       | <-- ClassId = 2
+  +++++++++++++++++++++++
+  |      .......        |
+  +++++++++++++++++++++++
+  |      Region N       | <-- ClassId = N, depends on the configuration.
+  +++++++++++++++++++++++
+
+This is a high level overview of how the heap is structured in scudo.
+The first region in the heap layout is reserved for internal use from the
+allocator. The program can not allocate space on that region for storing data.
+
+---[ 3.1 - The birth of the heap.
+
+Depending how scudo is bundled with the standard libc/c++ library on a given
+platform, scudo might be initialized either during startup or during the first
+scudo allocation/deallocation operation. On the linux platform scudo is not
+hardwired with the libc by default and so it requires you to link scudo in some
+way prior to running a program.
+
+For our testing we compiled the standalone scudo library [2] for linux and used
+the RPATH property to load scudo on our testbeds. But other better/dirty solutions
+can be found.
+
+By linking scudo on a program, the initialization of the heap will take place on
+the first allocation/deallocation operation. The start of the initialization
+process during the first call to malloc will take place in initThreadMaybe.
+
+--------------------------------- tsd_exclusive.h ---------------------------------
+
+ALWAYS_INLINE void initThreadMaybe(Allocator *Instance, bool MinimalInit) {
+  if (LIKELY(State.InitState != ThreadState::NotInitialized))
+    return;
+  initThread(Instance, MinimalInit);
+}
+----------------------------------------------------------------------------------
+
+Which... will take us on a relatively long path to Allocator->init()
+
+----------------------------------- combined.h -----------------------------------
+
+void init() {
+  ...
+  if (UNLIKELY(!getRandom(&Cookie, sizeof(Cookie))))
+    Cookie = static_cast<u32>(getMonotonicTime() ^
+                              (reinterpret_cast<uptr>(this) >> 4));
+  ...
+  initFlags();
+  ...
+  if (getFlags()->zero_contents)
+    Primary.Options.setFillContentsMode(ZeroFill);
+  // More parsing logic for the flags
+  ...
+  QuarantineMaxChunkSize =
+      static_cast<u32>(getFlags()->quarantine_max_chunk_size);
+  ...
+  Primary.init(ReleaseToOsIntervalMs);
+  ...
+}
+----------------------------------------------------------------------------------
+
+At this point scudo will try to read a random 32 bit integer from /dev/urandom
+(if possible) to be used as a Cookie which will be later used by the allocator
+when it needs a secure source of randomness.
+
+Next scudo will try to read flags, from the config file in flags.inc,
+from the program by calling __scudo_default_options (if present) and finally
+from the runtime environment variable SCUDO_OPTIONS. These flags can configure
+certain behaviours of scudo, like whether to implicitly zero the contents of
+a block returned by malloc etc. But the most important flags are:
+
+* quarantine_size_kb - "Size (in bytes) up to which chunks can be quarantined."
+* quarantine_max_chunk_size - "The size (in Kb) of quarantine used to delay the
+  actual deallocation of chunks."
+* thread_local_quarantine_size_kb - "The size (in Kb) of per-thread cache use
+  to offload the global quarantine."
+
+These flags can enable/disable the Quarantine for a process and they will
+be used to initialize the Quarantine.
+
+After initializing the Cookie and parsing the flags, scudo calls Primary.init
+for futher initialization of the primary allocator.
+
+----------------------------------- primary64.h -----------------------------------
+
+void init(s32 ReleaseToOsInterval) {
+  ...
+  // Reserve the space required for the Primary.
+  PrimaryBase = reinterpret_cast<uptr>(
+      map(nullptr, PrimarySize, nullptr, MAP_NOACCESS, &Data));
+
+  u32 Seed;
+  const u64 Time = getMonotonicTime();
+  if (!getRandom(reinterpret_cast<void *>(&Seed), sizeof(Seed)))
+    Seed = static_cast<u32>(Time ^ (PrimaryBase >> 12));
+  const uptr PageSize = getPageSizeCached(); // PageSize = 0x1000
+  for (uptr I = 0; I < NumClasses; I++) {
+    RegionInfo *Region = getRegionInfo(I);
+    // The actual start of a region is offset by a random number of pages
+    // when PrimaryEnableRandomOffset is set.
+    Region->RegionBeg = getRegionBaseByClassId(I) +
+                        (Config::PrimaryEnableRandomOffset
+                              ? ((getRandomModN(&Seed, 16) + 1) * PageSize)
+                              : 0);
+    Region->RandState = getRandomU32(&Seed);
+    Region->ReleaseInfo.LastReleaseAtNs = Time;
+  }
+  ...
+}
+----------------------------------------------------------------------------------
+
+At this point the entire heap for the primary allocator will be pre-mapped by
+calling map(...) which will later on call mmap on linux platforms. Scudo will ask
+from the kernel to only reserve a mapping on the VA space and not to actually
+allocate it all at once. The start of the heap relies on the ASLR of the system.
+The size of PrimarySize is constant but slightly differs from platform to
+platform and is configuration dependent. This mapping will be divided into
+a number of equal sized Regions.
+
+  ...
+  static const uptr RegionSize = 1UL << Config::PrimaryRegionSizeLog;
+  static const uptr NumClasses = SizeClassMap::NumClasses;
+  static const uptr PrimarySize = RegionSize * NumClasses;
+  ...
+
+Configuration parameters for the Config:: namespace can be found in 'allocator_config.h'
+For the linux platform, in the default configuration, the size of each region is
+4GB of space (1 << 32).
+
+After mapping the heap, again a different 32 bit random integer will be read from
+/dev/urandom (if possible). The Seed will be used as an additional source of entropy
+as well as for deriving RandStates for each Region. By re-reading a temporary
+32 bit random integer from our source of entropy, makes it harder for an
+attacker to predict the heap layout by leaking the Cookie value (if were used
+as an entropy for initializing regions also).
+
+Finally if specified in the configuration in 'allocator_config.h', the start
+of each Region will be randomized by an offset of [1, 16] * PageSize, to make
+it harder for an attacker to guess the start of each Region but also to introduce
+guard pages between them. Those gaps between each regions are reserved
+unreadable/unwritable VA space. With this clever trick, huge un-controlled
+heap overflows might be prevented in some cases.
+
+   Start of the heap.
+          |                                  Region for Class #0
+          +--------->+------------------+            ^
+                     |    Guard Page    |            |
+                     +------------------+------------+
+                     |                  |
+                     |                  |
+                     |                  |    Regions are starting with a random
+                     |                  |    offset R = [1,16] * PageSize
+                     |                  |
+                     |                  |
+                     +------------------+
+                     |                  |    Region for Class #1
+                     |    Guard Page    |
+                     +------------------+----------->
+                     |                  |
+                     |                  |
+                     |                  |
+                     |                  |
+                     |                  |
+            ---+---  +------------------+    Region for Class #k
+               |     |    Guard Page    |
+ Region Size   |     +------------------+----------->
+     4GB       |     |                  |
+               |     |                  |
+               |     |                  |
+               |     |                  |
+               |     |                  |
+               |     |                  |
+            ---+---  +------------------+
+                     |                  |
+                     |                  |
+                     |                  |
+                     |                  |
+                     |                  |
+                     |                  |
+                     |                  |
+                     |                  |
+                     +------------------+
+
+        Total size of the heap = NumClassess * 4GB
+
+---[ 3.2 - The birth of a block.
+
+Continuing our journey from our hypothetical malloc call, after the initialization
+of the heap, scudo is ready to service our request by allocating some space for us.
+
+----------------------------------- combined.h -----------------------------------
+
+NOINLINE void *allocate(uptr Size, Chunk::Origin Origin,
+                        uptr Alignment = MinAlignment,
+                        bool ZeroContents = false) {
+  initThreadMaybe();
+  ...
+  void *Block = nullptr;
+  uptr ClassId = 0;
+  uptr SecondaryBlockEnd = 0;
+  if (LIKELY(PrimaryT::canAllocate(NeededSize))) {
+    ClassId = SizeClassMap::getClassIdBySize(NeededSize);
+    bool UnlockRequired;
+    auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
+    Block = TSD->Cache.allocate(ClassId);
+    // If the allocation failed, the most likely reason with a 32-bit primary
+    // is the region being full. In that event, retry in each successively
+    // larger class until it fits. If it fails to fit in the largest class,
+    // fallback to the Secondary.
+    if (UNLIKELY(!Block)) {
+      while (ClassId < SizeClassMap::LargestClassId && !Block)
+        Block = TSD->Cache.allocate(++ClassId);
+      if (!Block)
+        ClassId = 0;
+    }
+    if (UnlockRequired)
+      TSD->unlock();
+  }
+  if (UNLIKELY(ClassId == 0))
+    Block = Secondary.allocate(Options, Size, Alignment, &SecondaryBlockEnd,
+                                FillContents);
+  if (UNLIKELY(!Block)) {
+    if (Options.get(OptionBit::MayReturnNull))
+      return nullptr;
+    reportOutOfMemory(NeededSize);
+  }
+  ...
+}
+----------------------------------------------------------------------------------
+
+The first thing scudo has to decide is what allocator to use to service our
+request. If our request is too big for the primary allocator, canAllocate()
+will return false and scudo will try the Secondary Allocator. If the secondary
+also fails, scudo will abort the program. We will focus only on the Primary.
+
+The next thing scudo needs to decide, is which region shall service the
+request. Each region is representing a class and hence is given a ClassId.
+Each one of them is carved into equal sized blocks. For this reason a region
+is expected to service a range of allocation sizes and like other allocators
+malloc might return to you more space than what you requested.
+
+The sizes each region services is platform dependent.
+Here is a table for the first 6 regions:
+
+  +=--------=+=---------=+
+  |   Size   |  ClassId  |
+  +=--------=+=---------=+
+  |    32    |     1     |
+  +----------------------+
+  |    48    |     2     |
+  +----------------------+
+  |    64    |     3     |
+  +----------------------+
+  |    80    |     4     |
+  +----------------------+
+  |    96    |     5     |
+  +----------------------+
+  |    112   |     6     |
+  +----------------------+
+
+----[ 3.2.1 - Checking for orphans first
+
+After deciding which region can service the request, scudo will check the
+cache of the allocator for any available free blocks in the specified region
+before attempting to map more space to the heap.
+
+---------------------------------- local_cache.h ----------------------------------
+
+void *allocate(uptr ClassId) {
+  PerClass *C = &PerClassArray[ClassId];
+  if (C->Count == 0) {
+    if (UNLIKELY(!refill(C, ClassId)))
+      return nullptr;
+  }
+  ...
+  CompactPtrT CompactP = C->Chunks[--C->Count];
+  ...
+  return Allocator->decompactPtr(ClassId, CompactP);
+}
+----------------------------------------------------------------------------------
+
+Each region holds a PerClass entry in the PerClassArray
+for tracking available free blocks in a compact format.
+
+  ...
+  static const uptr NumClasses = SizeClassMap::NumClasses;
+  static const uptr BatchClassId = SizeClassMap::BatchClassId;
+  struct PerClass {
+    u32 Count;
+    u32 MaxCount;
+    // Note: ClassSize is zero for the transfer batch.
+    uptr ClassSize;
+    CompactPtrT Chunks[2 * TransferBatch::MaxNumCached];
+  };
+  PerClass PerClassArray[NumClasses] = {};
+  ...
+
+Each PerClass entry can hold up to 2 * TransferBatch::MaxNumCached
+free blocks. Double the size of blocks that a TransferBatch can
+hold.
+
+  ...
+	struct TransferBatch {
+		static const u32 MaxNumCached = SizeClassMap::MaxNumCachedHint;
+		...
+		TransferBatch *Next;
+	  private:
+		u32 Count;
+		CompactPtrT Batch[MaxNumCached];
+	};
+  ...
+
+A TransferBatch is a structure designed to hold -as the name suggests-
+batches of free blocks in a compact format for a specific region. For the
+sole purpose of "transfering" and repopulating the cache in a fast way.
+The capacity of a TransferBatch can be up to MaxNumCached. Half of the total
+blocks that a PerClass entry can hold. This is happening because when a
+TransferBatch refills the cache, you also want some free space in the cache
+in case the program frees some blocks.
+
+The transferbatches of a region form a single linked list together.
+The head of the TransferBatch singly linked list is located in the
+following structure.
+
+  ...
+    struct UnpaddedRegionInfo {
+        HybridMutex Mutex;
+        SinglyLinkedList<TransferBatch> FreeList;
+        uptr RegionBeg = 0;
+        RegionStats Stats = {};
+        u32 RandState = 0;
+        uptr MappedUser = 0;    // Bytes mapped for user memory.
+        uptr AllocatedUser = 0; // Bytes allocated for user memory.
+        MapPlatformData Data = {};
+        ReleaseToOsInfo ReleaseInfo = {};
+        bool Exhausted = false;
+    };
+  ...
+
+So returning back to allocate(), if the cache is not empty by simply checking
+if the Count field of the corresponding PerClass entry is not zero, scudo
+will "decompact" the last free block pointer stored in the PerClass entry and
+return it back to the program.
+
+- Compact pointers are just offsets from the start of a region shifted by a
+  Scale factor.
+
+  ...
+  #define SCUDO_MIN_ALIGNMENT_LOG FIRST_32_SECOND_64(3, 4)
+  typedef u32 PrimaryCompactPtrT;
+  static const uptr PrimaryCompactPtrScale = SCUDO_MIN_ALIGNMENT_LOG;
+  ...
+
+Note that the above definition is for the android platform. In linux, compact
+pointers are treated as normal u64 pointers in the default configuration.
+Given the Base address of a region, the pointer to a cached block can be
+retrieved using the stored compact pointer in the cache by the following rule:
+
+    ...
+	Ptr = Base + (CompactPtr << PrimaryCompactPtrScale)
+    ...
+
+Note that in linux, both Base and PrimaryCompactPtrScale will be 0 in the
+default configuration.
+
+If the Count field of the cache is zero, scudo will try to see if there are
+any transfer batches available to repopulate the contents of the cache before
+attempting to actually allocate more space from the heap. This will happen by
+calling refill().
+
+---------------------------------- local_cache.h ----------------------------------
+
+NOINLINE bool refill(PerClass *C, uptr ClassId) {
+  initCacheMaybe(C);
+  TransferBatch *B = Allocator->popBatch(this, ClassId);
+  if (UNLIKELY(!B))
+    return false;
+  C->Count = B->getCount();
+  B->copyToArray(C->Chunks); // memcpy(PerClass, TransferBatch, Count)
+  B->clear();
+  destroyBatch(ClassId, B); // free(TransferBatch) -> Region 0
+  return true;
+}
+----------------------------------------------------------------------------------
+
+In refill() scudo will call popBatch() to pop a TransferBatch from the
+FreeList (if available), or allocate a new TransferBatch.
+
+----------------------------------- primary64.h -----------------------------------
+
+TransferBatch *popBatch(CacheT *C, uptr ClassId) {
+  ...
+  RegionInfo *Region = getRegionInfo(ClassId);
+  ScopedLock L(Region->Mutex);
+  TransferBatch *B = Region->FreeList.front();
+  if (B) {
+    Region->FreeList.pop_front();
+  } else {
+    B = populateFreeList(C, ClassId, Region);
+    if (UNLIKELY(!B))
+      return nullptr;
+  }
+  ...
+  return B;
+}
+----------------------------------------------------------------------------------
+
+After popping a TransferBatch scudo will simply copy its contents to the
+cache by calling memcpy to speed up the "transfering".
+
+----[ 3.2.2 - Orphanage is empty
+
+If both the PerClass entry & FreeList for that region are empty,
+scudo will allocate some transfer batches for the FreeList by calling
+populateFreeList().
+
+----------------------------------- primary64.h -----------------------------------
+
+NOINLINE TransferBatch *populateFreeList(CacheT *C, uptr ClassId,
+                                          RegionInfo *Region) {
+  const uptr Size = getSizeByClassId(ClassId);
+  const u32 MaxCount = TransferBatch::getMaxCached(Size);
+  const uptr RegionBeg = Region->RegionBeg;
+  const uptr MappedUser = Region->MappedUser;
+  const uptr TotalUserBytes = Region->AllocatedUser + MaxCount * Size;
+  // Map more space for blocks, if necessary.
+  if (TotalUserBytes > MappedUser) {
+    // Do the mmap for the user memory.
+    const uptr MapSize =
+        roundUpTo(TotalUserBytes - MappedUser, MapSizeIncrement);
+    const uptr RegionBase = RegionBeg - getRegionBaseByClassId(ClassId);
+    if (UNLIKELY(RegionBase + MappedUser + MapSize > RegionSize)) {
+      if (!Region->Exhausted) {
+        Region->Exhausted = true;
+        ... // Warning or abort with exhaustion message
+      }
+      return nullptr;
+    }
+    if (MappedUser == 0)
+      Region->Data = Data;
+    if (UNLIKELY(!map(
+            reinterpret_cast<void *>(RegionBeg + MappedUser), MapSize,
+            "scudo:primary",
+            MAP_ALLOWNOMEM | MAP_RESIZABLE |
+                (useMemoryTagging<Config>(Options.load()) ? MAP_MEMTAG : 0),
+            &Region->Data)))
+      return nullptr;
+    Region->MappedUser += MapSize;
+  }
+  ...
+}
+----------------------------------------------------------------------------------
+
+Before trying to allocate some transfer batches for the FreeList, it needs
+to confirm there is enough available mapped space on the region. The number
+of transfer batches to be allocated varies between different regions because
+the bigger the blocks of a region, the bigger the memory cost for the same
+number of transfer batches.
+
+The total number of transfer batches to be allocated for the FreeList depends
+on the return value of getMaxCached(). A table for MaxCount for an x86_64
+linux platform can be seen below:
+
+  +=------------------=+=---------=+
+  |   getMaxCached()   |  ClassId  |
+  +=------------------=+=---------=+
+  |        14          |     1     |
+  +--------------------------------+
+  |        14          |     2     |
+  +--------------------------------+
+  |        14          |     3     |
+  +--------------------------------+
+  |        12          |     4     |
+  +--------------------------------+
+  |        10          |     5     |
+  +--------------------------------+
+  |         9          |     6     |
+  +--------------------------------+
+  |         7          |     7     |
+  +--------------------------------+
+  |         5          |     8     |
+  +--------------------------------+
+  |         5          |     9     |
+  +--------------------------------+
+  |         4          |    10     |
+  +--------------------------------+
+  |         3          |    11     |
+  +--------------------------------+
+  |         2          |    12     |
+  +--------------------------------+
+  |         2          |    13     |
+  +--------------------------------+
+  |         1          |    14     |
+  +--------------------------------+
+                 ...
+  +--------------------------------+
+  |         1          |     N     |
+  +--------------------------------+
+
+Then if the sum of the total allocated space in the region and the extra size
+for the transfer batches surpasses the actual mapped space for that region,
+scudo will map the required space on demand (if possible). Scudo will try to
+round the mapping space by MapSizeIncrement. Which in our case is 256KB.
+
+----------------------------------- primary64.h -----------------------------------
+
+NOINLINE TransferBatch *populateFreeList(CacheT *C, uptr ClassId,
+                                          RegionInfo *Region) {
+  ...
+  const u32 NumberOfBlocks = Min(
+      MaxNumBatches * MaxCount,
+      static_cast<u32>((Region->MappedUser - Region->AllocatedUser) / Size));
+
+  constexpr u32 ShuffleArraySize =
+      MaxNumBatches * TransferBatch::MaxNumCached;
+  CompactPtrT ShuffleArray[ShuffleArraySize];
+
+  const uptr CompactPtrBase = getCompactPtrBaseByClassId(ClassId);
+  uptr P = RegionBeg + Region->AllocatedUser;
+  for (u32 I = 0; I < NumberOfBlocks; I++, P += Size)
+    ShuffleArray[I] = compactPtrInternal(CompactPtrBase, P);
+  // No need to shuffle the batches size class.
+  if (ClassId != SizeClassMap::BatchClassId)
+    shuffle(ShuffleArray, NumberOfBlocks, &Region->RandState);
+  for (u32 I = 0; I < NumberOfBlocks;) {
+    TransferBatch *B =
+        C->createBatch(ClassId, reinterpret_cast<void *>(decompactPtrInternal(
+                                    CompactPtrBase, ShuffleArray[I])));
+    if (UNLIKELY(!B))
+      return nullptr;
+    const u32 N = Min(MaxCount, NumberOfBlocks - I);
+    B->setFromArray(&ShuffleArray[I], N);
+    Region->FreeList.push_back(B);
+    I += N;
+  }
+  TransferBatch *B = Region->FreeList.front();
+  Region->FreeList.pop_front();
+  const uptr AllocatedUser = Size * NumberOfBlocks;
+  Region->AllocatedUser += AllocatedUser;
+  return B;
+}
+----------------------------------------------------------------------------------
+
+After ensuring there is enough space for our transfer batches, scudo will
+carve the blocks needed from the bottom of the region sequentially, shuffle
+them randomly (by using the corresponding RandState for that region), group
+them into transfer batches and link them to the FreeList.
+
+Note that transfer batches are being allocated like normal blocks but in a
+special Region, with a ClassId = 0. The program can not allocate blocks in
+that region directly by calling malloc with a specific size. But as you can
+see above there is no need for shuffling the transfer batches in Region 0.
+
+----[ 3.2.3 - Integrity checks on the header.
+
+The last step for our malloc() before returning a block back to the program
+is to prepend a header for tracking some minimal information for the block.
+
+                         Block header
+  -------------------------------------------------------------
+  | 16 bits  |  16 bits | 20 bits | 2 bits | 2 bits | 8 bits  |
+  -------------------------------------------------------------
+  | Checksum |  Offset  |   Size  | Origin |  State | ClassId |
+  -------------------------------------------------------------
+
+A really good explaination for those fields can be found in the LLVM documentation:
+
+* ClassId - "the class ID for that block, which identifies the region where
+  the block resides for Primary backed allocations, or 0 for Secondary backed
+  allocations"
+* State - "the state of the chunk (available, allocated or quarantined)"
+* Origin - "the allocation type (malloc, new, new[] or memalign), to detect
+  potential mismatches in the allocation APIs used"
+* Size - "the size (Primary) or unused bytes amount (Secondary) for that chunk,
+  which is necessary for reallocation or sized-deallocation operations"
+* Offset - "the offset of the chunk, which is the distance in bytes from the
+  beginning of the returned chunk to the beginning of the backend allocation
+  (the “block”)"
+* Checksum - "the 16-bit checksum"
+
+----------------------------------- combined.h -----------------------------------
+
+NOINLINE void *allocate(uptr Size, Chunk::Origin Origin,
+                        uptr Alignment = MinAlignment,
+                        bool ZeroContents = false) {
+  ...
+  Chunk::UnpackedHeader Header = {};
+  ...
+  Header.ClassId = ClassId & Chunk::ClassIdMask;
+  Header.State = Chunk::State::Allocated;
+  Header.OriginOrWasZeroed = Origin & Chunk::OriginMask;
+  Header.SizeOrUnusedBytes =
+      (ClassId ? Size : SecondaryBlockEnd - (UserPtr + Size)) &
+      Chunk::SizeOrUnusedBytesMask;
+  Chunk::storeHeader(Cookie, Ptr, &Header);
+  ...
+  return Ptr;
+}
+----------------------------------------------------------------------------------
+
+The most important field in the header is the checksum. The checksum
+ensures the integrity of the header and protects from potential corruption.
+It is checked each time the block is being freed.
+
+The checksum for each block is produced as a CRC32 of the Cookie, the heap
+address of the block and the contents of it's header (without the checksum).
+With this way although an attacker may control the contents of the header,
+but he needs also a Cookie and a heap leak in order to produce his own valid
+checksums.
+
+By leaking both the heap address and the header of a block an attacker can
+produce a cookie collision which is enough to produce his own valid
+checksums.
+
+---[ 3.3 - The death of a block.
+
+Once the program is done with a block of memory it will call free() on it
+to release the allocated memory.
+
+----------------------------------- combined.h -----------------------------------
+
+NOINLINE void deallocate(void *Ptr, Chunk::Origin Origin, uptr DeleteSize = 0,
+                          UNUSED uptr Alignment = MinAlignment) {
+  ...
+  if (UNLIKELY(!Ptr))
+    return;
+
+  if (UNLIKELY(!isAligned(reinterpret_cast<uptr>(Ptr), MinAlignment)))
+    reportMisalignedPointer(AllocatorAction::Deallocating, Ptr);
+
+  Chunk::UnpackedHeader Header;
+  Chunk::loadHeader(Cookie, Ptr, &Header);
+
+  if (UNLIKELY(Header.State != Chunk::State::Allocated))
+    reportInvalidChunkState(AllocatorAction::Deallocating, Ptr);
+
+  ... // Some more sanity checks.
+
+  quarantineOrDeallocateChunk(Options, TaggedPtr, &Header, Size);
+}
+----------------------------------------------------------------------------------
+
+When free() is called upon a block, some sanity checks will be done.
+
+Like ensuring the pointer that is being freed is not NULL, is aligned etc.
+Then validates the checksum of the header and performs some additional sanity
+checks on the header.
+
+If the block passes the checks, then quarantineOrDeallocateChunk() will be called.
+Inside quarantineOrDeallocateChunk(), scudo needs to take an important decision.
+Whether to put the block in the Quarantine or back in the Cache.
+
+----------------------------------- combined.h -----------------------------------
+
+void quarantineOrDeallocateChunk(Options Options, void *TaggedPtr,
+                                  Chunk::UnpackedHeader *Header, uptr Size) {
+  ...
+  Chunk::UnpackedHeader NewHeader = *Header;
+  // If the quarantine is disabled, the actual size of a chunk is 0 or larger
+  // than the maximum allowed, we return a chunk directly to the backend.
+  // This purposefully underflows for Size == 0.
+  const bool BypassQuarantine = !Quarantine.getCacheSize() ||
+                                ((Size - 1) >= QuarantineMaxChunkSize) ||
+                                !NewHeader.ClassId;
+  if (BypassQuarantine)
+    NewHeader.State = Chunk::State::Available;
+  else
+    NewHeader.State = Chunk::State::Quarantined;
+  ...
+  if (BypassQuarantine) {
+    ...
+    void *BlockBegin = getBlockBegin(Ptr, &NewHeader);
+    const uptr ClassId = NewHeader.ClassId;
+    if (LIKELY(ClassId)) {
+      bool UnlockRequired;
+      auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
+      TSD->Cache.deallocate(ClassId, BlockBegin);
+      if (UnlockRequired)
+        TSD->unlock();
+    } else {
+      if (UNLIKELY(useMemoryTagging<Params>(Options)))
+        storeTags(reinterpret_cast<uptr>(BlockBegin),
+                  reinterpret_cast<uptr>(Ptr));
+      Secondary.deallocate(Options, BlockBegin);
+    }
+  }
+  ...
+}
+----------------------------------------------------------------------------------
+
+Scudo decides whether to put a block in the Quarantine or back in the Cache with
+the help of the 'BypassQuarantine' condition. This condition will decide the fate
+of the block. If the Quarantine is enabled and hence Quarantine.getCacheSize() > 0,
+the fate of the block depends mostly upon it's size. Blocks that are being handled
+by the Secondary allocator are assigned with a ClassId = 0 and they bypass the
+Quarantine.
+
+So a block of the primary allocator bypasses the Quarantine only when it's size is
+less than the QuarantineMaxChunkSize threshold. For this section we will focus on
+the primary blocks that suprass this threshold. We will describe the Quarantine
+separately in the following section.
+
+Eventually for such primary blocks, TSD->Cache.deallocate() will be called;
+
+---------------------------------- local_cache.h ----------------------------------
+
+void deallocate(uptr ClassId, void *P) {
+  CHECK_LT(ClassId, NumClasses);
+  PerClass *C = &PerClassArray[ClassId];
+  ...
+  if (C->Count == C->MaxCount)
+    drain(C, ClassId);
+  ...
+  C->Chunks[C->Count++] =
+      Allocator->compactPtr(ClassId, reinterpret_cast<uptr>(P));
+  ...
+}
+----------------------------------------------------------------------------------
+
+During deallocate(), scudo will check first whether the cache for that region
+is not already full. If it's not, then it will simply add it into the cache.
+If the cache is full, scudo needs to transfer the current contents of the
+PerClass entry to the FreeList by creating a TransferBatch. This will take
+place in drain().
+
+--[ 4 - Quarantine
+
+Let's see what the official documentation has to say:
+
+"offers a way to delay the deallocation operations, preventing blocks
+to be immediately available for reuse. Blocks held will be recycled once
+certain size criteria are reached. This is essentially a delayed freelist
+which can help mitigate some use-after-free situations. This feature is
+fairly costly in terms of performance and memory footprint, is mostly
+controlled by runtime options and is disabled by default."
+
+---[ 4.1 - Usefull classes
+
+There are three classes that are the most important on this quarantine
+implementation (they contain various methods but we have limited them
+for simplicity reasons):
+
+GlobalQuarantine, QuarantineCache & QuarantineBatch:
+
+                           +--------------|
+ +++++++++++++++++++++++   |     ++++++++++++++++++++
+ |  GlobalQuarantine   |   |     | QuarantineCache  |
+ +++++++++++++++++++++++   |     ++++++++++++++++++++
+ |     CacheMutex      |   |     |  &lt;RDCTD&gt; List;   | -------+
+ -----------------------   |     --------------------        |
+ |    CacheT Cache     | --+     | atomic_uptr Size |        |
+ -----------------------   |     --------------------        |
+ |    RecycleMutex     |   +--------------|                  |
+ -----------------------                                     |
+ | atomic_uptr MinSize |      +++++++++++++++++++++++++      |
+ -----------------------      |    QuarantineBatch    |      |
+ |   '' MaxSize        |      +++++++++++++++++++++++++ <----+
+ -----------------------      | QuarantineBatch *Next |
+ |   '' MaxCacheSize   |      -------------------------
+ -----------------------      |       uptr Size       |
+                              -------------------------
+                              |       u32 Count       |
+                              -------------------------
+                              |   void *Batch[1019]   |
+                              -------------------------
+
+QuarantineBatch contents;
+~ A pointer to the Next QuarantineBatch in the linked list.
+~ A Size variable which is the total size of quarantined nodes recorded in
+  this batch + sizeof(QuarantineBatch).
+  So even if Batch array is empty the
+  Size must be equal to sizeof(QuarantineBatch).
+~ A Count variable which will be a counter of how many nodes
+  have been stored in *Batch[].
+~ Lastly we have the Batch array that is responsible for holding
+  the pointers of the quarantined chunks.
+
+QuarantineCache contents;
+~ List, which unrolls to the following;
+  ~ Size, counter of how many QuarantineBatches are linked in this list.
+  ~ First, first node in the linked list.
+  ~ Last, last node in the linked list.
+~ A Size which is the total size of quarantined nodes recorded in
+  every QuarantineBatch that is linked in the List.
+
+
+---[ 4.2 - Phase 1, the entrance
+
+When calling free() API, quarantineOrDeallocateChunk() method will
+be called internally, which will firstly do some checks if it should
+place the chunk on quarantine or not (dah!). The following code snippet
+is the part that is executed when it has figured to quarantine the chunk.
+
+----------------------------------- combined.h -----------------------------------
+else {
+    bool UnlockRequired;
+    auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
+    Quarantine.put(&TSD->QuarantineCache,
+                   QuarantineCallback(*this, TSD->Cache), Ptr, Size);
+    if (UnlockRequired)
+    	TSD->unlock();
+}
+----------------------------------------------------------------------------------
+
+It will call the put method of a GlobalQuarantine object.
+It fetches a QuarantineCache object pointer from the thread specific
+data region and passes it as the first argument on the function,
+second argument will be a QuarantineCallback object which is explained
+in the  following comment;
+
+---------------------------------- quarantine.h ----------------------------------
+
+// The callback interface is:
+// void Callback::recycle(Node *Ptr);
+// void *Callback::allocate(uptr Size);
+// void Callback::deallocate(void *Ptr);
+----------------------------------------------------------------------------------
+
+The pointer to the chunk that we are about to quarantine and it's size
+will be placed as third and fourth argument respectively.
+The put method will then do the following;
+
+---------------------------------- quarantine.h ----------------------------------
+
+void put(CacheT *C, Callback Cb, Node *Ptr, uptr Size) {
+  C->enqueue(Cb, Ptr, Size);
+  ...
+}
+----------------------------------------------------------------------------------
+
+enqueue function will essentially push the to-be-quarantined chunk pointer
+to the "delayed freelist" as it was called in the documentation.
+
+---------------------------------- quarantine.h ----------------------------------
+
+void enqueue(Callback Cb, void *Ptr, uptr Size) {
+  if (List.empty() || List.back()->Count == QuarantineBatch::MaxCount) {
+    QuarantineBatch *B =
+      reinterpret_cast<QuarantineBatch *>(Cb.allocate(sizeof(*B)));
+    DCHECK(B);
+    B->init(Ptr, Size);
+    enqueueBatch(B);
+  } else {
+    List.back()->push_back(Ptr, Size);
+    addToSize(Size);
+  }
+}
+----------------------------------------------------------------------------------
+
+If the linked list of QuarantineBatch is empty or the last QuarantineBatch
+object in the List is full, it will create a new one that its buffer
+is allocated like a normal chunk and initialize it by placing our
+to-be-quarantined-chunk pointer in the *Batch[] and setting the
+Count & Size variables to the appropriate value.
+Lastly it enqueues B to the List and update the Size variable
+of the QuarantineCache object.
+
+On the other hand, it will just be stored in the *Batch[] of the last List
+node and update the Count & Size of the object.
+
+---[ 4.3 - Phase 2, the escape
+
+In order for the quarantined chunks to escape back to reality
+some criteria have to be met.
+
+Let's have a look at the rest of put() function;
+
+---------------------------------- quarantine.h ----------------------------------
+
+void put(CacheT *C, Callback Cb, Node *Ptr, uptr Size) {
+  C->enqueue(Cb, Ptr, Size);
+  if (C->getSize() > getCacheSize())
+    drain(C, Cb);
+}
+----------------------------------------------------------------------------------
+
+This if statement is essentially checking if the total memory used
+including internal accounting has exceeded MaxCacheSize.
+If it has, call drain. Which will merge the thread local QuarantineCache
+object to the GlobalQuarantine's QuarantineCache object;
+
+---------------------------------- quarantine.h ----------------------------------
+
+void NOINLINE drain(CacheT *C, Callback Cb) {
+  {
+    ScopedLock L(CacheMutex);
+    Cache.transfer(C);
+  }
+  if (Cache.getSize() > getMaxSize() && RecycleMutex.tryLock())
+    recycle(atomic_load_relaxed(&MinSize), Cb);
+}
+----------------------------------------------------------------------------------
+
+Lastly it makes sure that the GlobalQuarantine's QuarantineCache object
+hasn't exceeded a limit, which is different than the one in
+put function.
+
+If it has surpassed it, call recycle() which is the function
+responsible for giving quarantined chunks a chance to escape;
+
+---------------------------------- quarantine.h ----------------------------------
+
+void NOINLINE recycle(uptr MinSize, Callback Cb) {
+  CacheT Tmp;
+  Tmp.init();
+  {
+    ScopedLock L(CacheMutex);
+
+    const uptr CacheSize = Cache.getSize();
+    const uptr OverheadSize = Cache.getOverheadSize();
+
+    constexpr uptr OverheadThresholdPercents = 100;
+    if (CacheSize > OverheadSize &&
+      OverheadSize * (100 + OverheadThresholdPercents) >
+          CacheSize * OverheadThresholdPercents) {
+      Cache.mergeBatches(&Tmp);
+    }
+
+    // Extract enough chunks from the quarantine to get below
+    // the max quarantine size and leave some leeway for the
+    // newly quarantined chunks.
+    while (Cache.getSize() > MinSize)
+      Tmp.enqueueBatch(Cache.dequeueBatch());
+  }
+  RecycleMutex.unlock();
+  doRecycle(&Tmp, Cb);
+}
+----------------------------------------------------------------------------------
+
+The if statement tries to guess if it's likely to find batches suitable
+for merge in this QuarantineBatch List. If it is, call mergeBatches() which
+will try merging batches to save up some memory.
+
+The last call will be to doRecycle() which will unquarantine the nodes
+that exist in Tmp's List in random order.
+
+So the ones that get extracted in the while loop, will be the ones to
+escape quarantine.
+
+--[ 5 - Conclusion
+
+We must agree that Scudo does a decent job at making exploitation harder,
+But all these new things can be a target too, right?
+Thank you for reading. Please reach us out if you found any mistakes/typos
+in this article, it will be much appreciated!
+
+--[ 6 - Useful links
+
+[<a href=https://llvm.org/docs/ScudoHardenedAllocator.html target="_blank">https://llvm.org/docs/ScudoHardenedAllocator.html</a>]
+[<a href=https://blog.infosectcbr.com.au/2020/04/breaking-secure-checksums-in-scudo_8.html target="_blank">https://blog.infosectcbr.com.au/2020/04/breaking-secure-checksums-in-scudo_8.html</a>]
+[<a href=https://blog.csdn.net/feelabclihu/article/details/122264427 target="_blank">https://blog.csdn.net/feelabclihu/article/details/122264427</a>]
