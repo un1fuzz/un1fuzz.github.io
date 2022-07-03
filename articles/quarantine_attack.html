@@ -120,7 +120,7 @@
     If both of them get enqueued we won't be able to fix the header of the chunk
     after it gets recycled the first time and scudo will abort when trying to return
     it for the second time.
-    To achieve that some QuarantineBatch feng shui is essential.
+    To bypass that some QuarantineBatch feng shui is essential.
     Here is a pattern that will do the job (each block represents a QuarantineBatch structure);
 
     The pattern can be found [<a href=https://github.com/un1fuzz/scudo_research/blob/main/quarantine_double_return_pattern.txt target="_blank">here</a>]
