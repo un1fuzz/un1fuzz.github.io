@@ -330,12 +330,12 @@ NOINLINE void *allocate(uptr Size, Chunk::Origin Origin,
 
 The first thing scudo has to decide is what allocator to use to service our
 request. If our request is too big for the primary allocator, canAllocate()
-will return false and scudo will try the Secondary Allocator. If the secondary
-also fails, scudo will abort the program. We will focus only on the Primary.
+will return false and Secondary Allocator will be used. 
+We will focus only on the Primary.
 
-The next thing scudo needs to decide, is which region shall service the
+The next thing that needs to be resolved is which region shall service the
 request. Each region is representing a class and hence is given a ClassId.
-Each one of them is carved into equal sized blocks. For this reason, a region
+Each one of them is cut into equal sized blocks. For this reason, a region
 is expected to service a range of allocation sizes and like other allocators,
 it might return to you more space than what you requested.
 
