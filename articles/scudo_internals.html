@@ -117,8 +117,8 @@ architectures."
   +++++++++++++++++++++++
 
 This is a high level overview of how the heap is structured in scudo.
-The first region in the heap layout is reserved for internal use from the
-allocator. The program can not allocate space on that region for storing data.
+The first region in the heap layout is reserved for internal usage
+The program can't allocate space on that region for storing user data.
 
 <span id="a3_1"></span>---[ 3.1 - The birth of the heap.
 
