@@ -227,9 +227,8 @@ a number of equal sized Regions.
   static const uptr PrimarySize = RegionSize * NumClasses;
   ...
 
-Configuration parameters for the Config:: namespace can be found in 'allocator_config.h'
-For the linux platform, in the default configuration, the size of each region is
-4GB of space (1 << 32).
+(Configuration parameters for the Config:: namespace can be found in 'allocator_config.h').
+For linux systems, the size of each region is 4GB of space (1 << 32).
 
 After mapping the heap, a new 32 bit random integer will be read from
 /dev/urandom. This value will be used as an additional source of entropy
