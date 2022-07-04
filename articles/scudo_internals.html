@@ -170,20 +170,18 @@ void init() {
 A 32 bit integer will be read from /dev/urandom to be used as a
 secure source of randomness where it's needed.
 
-Next scudo will try to read flags, from the config file in flags.inc,
-from the program by calling __scudo_default_options (if present) and finally
-from the runtime environment variable SCUDO_OPTIONS. These flags can configure
-certain behaviours of scudo, like whether to implicitly zero the contents of
-a block returned by malloc etc. But the most important flags are:
+The flags will then be parsed(there are various ways to set them).
+These flags can configure certain behaviours of scudo.
+e.g; whether to implicitly zero the contents of a block etc.
+
+While testing we have enabled Quarantine by setting the following flags 
+in the SCUDO_OPTIONS environment variable.
 
 * quarantine_size_kb - "Size (in bytes) up to which chunks can be quarantined."
 * quarantine_max_chunk_size - "The size (in Kb) of quarantine used to delay the
   actual deallocation of chunks."
 * thread_local_quarantine_size_kb - "The size (in Kb) of per-thread cache use
   to offload the global quarantine."
-
-These flags can enable/disable the Quarantine for a process and they will
-be used to initialize the Quarantine.
 
 After initializing the Cookie and parsing the flags, scudo calls Primary.init
 for futher initialization of the primary allocator.
