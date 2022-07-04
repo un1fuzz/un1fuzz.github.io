@@ -131,9 +131,8 @@ way prior to running a program.
 For our testing we compiled the standalone scudo library for linux and used the
 RPATH property to load scudo on our testbeds.
 
-By linking scudo on a program, the initialization of the heap will take place on
-the first allocation/deallocation operation. The start of the initialization
-process during the first call to malloc will take place in initThreadMaybe.
+The initialization of the heap will take place on the first allocation 
+operation. The function responsible for this is initThreadMaybe.
 
 --------------------------------- tsd_exclusive.h ---------------------------------
 
