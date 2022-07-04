@@ -335,9 +335,9 @@ also fails, scudo will abort the program. We will focus only on the Primary.
 
 The next thing scudo needs to decide, is which region shall service the
 request. Each region is representing a class and hence is given a ClassId.
-Each one of them is carved into equal sized blocks. For this reason a region
-is expected to service a range of allocation sizes and like other allocators
-malloc might return to you more space than what you requested.
+Each one of them is carved into equal sized blocks. For this reason, a region
+is expected to service a range of allocation sizes and like other allocators,
+it might return to you more space than what you requested.
 
 The sizes each region services is platform dependent.
 Here is a table for the first 6 regions:
