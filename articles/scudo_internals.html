@@ -183,8 +183,8 @@ in the SCUDO_OPTIONS environment variable.
 * thread_local_quarantine_size_kb - "The size (in Kb) of per-thread cache use
   to offload the global quarantine."
 
-After initializing the Cookie and parsing the flags, scudo calls Primary.init
-for futher initialization of the primary allocator.
+When all this is done, Primary.init will be called for further initialization 
+of the primary allocator.
 
 ----------------------------------- primary64.h -----------------------------------
 
