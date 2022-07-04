@@ -124,9 +124,9 @@ to allocate space on that region for storing user data.
 
 Depending how scudo is bundled with the standard libc/c++ library on a given
 platform, scudo might be initialized either during startup or during the first
-scudo allocation/deallocation operation. On the linux platform scudo is not
-hardwired with the libc by default and so it requires you to link scudo in some
-way prior to running a program.
+scudo allocation operation. On the linux platform scudo is not hardwired with 
+the glibc by default and so it requires you to link scudo in some way before
+running a program.
 
 For our testing we compiled the standalone scudo library for linux and used the
 RPATH property to load scudo on our testbeds.
