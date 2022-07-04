@@ -454,14 +454,13 @@ return it back to the program.
 Note that the above definition is for the android platform. In linux, compact
 pointers are treated as normal u64 pointers in the default configuration.
 Given the Base address of a region, the pointer to a cached block can be
-retrieved using the stored compact pointer in the cache by the following rule:
+retrieved by using the following rule:
 
     ...
 	Ptr = Base + (CompactPtr << PrimaryCompactPtrScale)
     ...
 
-Note that in linux, both Base and PrimaryCompactPtrScale will be 0 in the
-default configuration.
+So in linux, both Base and PrimaryCompactPtrScale will be 0.
 
 If the Count field of the cache is zero, scudo will try to see if there are
 any transfer batches available to repopulate the contents of the cache before
