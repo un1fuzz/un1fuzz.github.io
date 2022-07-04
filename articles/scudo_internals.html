@@ -378,8 +378,8 @@ void *allocate(uptr ClassId) {
 }
 ----------------------------------------------------------------------------------
 
-Each region holds a PerClass entry in the PerClassArray
-for tracking available free blocks in a compact format.
+Each region holds a PerClass entry in the PerClassArray for tracking 
+available free blocks in a compact format.
 
   ...
   static const uptr NumClasses = SizeClassMap::NumClasses;
@@ -394,9 +394,8 @@ for tracking available free blocks in a compact format.
   PerClass PerClassArray[NumClasses] = {};
   ...
 
-Each PerClass entry can hold up to 2 * TransferBatch::MaxNumCached
-free blocks. Double the size of blocks that a TransferBatch can
-hold.
+Each PerClass entry can hold up to 2 * TransferBatch::MaxNumCached free 
+blocks. Double the size of blocks that a TransferBatch can hold.
 
   ...
 	struct TransferBatch {
