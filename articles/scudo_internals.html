@@ -232,12 +232,9 @@ Configuration parameters for the Config:: namespace can be found in 'allocator_c
 For the linux platform, in the default configuration, the size of each region is
 4GB of space (1 << 32).
 
-After mapping the heap, again a different 32 bit random integer will be read from
-/dev/urandom (if possible). The Seed will be used as an additional source of entropy
-as well as for deriving RandStates for each Region. By re-reading a temporary
-32 bit random integer from our source of entropy, makes it harder for an
-attacker to predict the heap layout by leaking the Cookie value (if were used
-as an entropy for initializing regions also).
+After mapping the heap, a new 32 bit random integer will be read from
+/dev/urandom. This value will be used as an additional source of entropy
+as well as for deriving RandStates for each Region.
 
 Finally if specified in the configuration in 'allocator_config.h', the start
 of each Region will be randomized by an offset of [1, 16] * PageSize, to make
