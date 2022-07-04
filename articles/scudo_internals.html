@@ -652,8 +652,8 @@ see above there is no need for shuffling the transfer batches in Region 0.
 
 <span id="a3_2_3"></span>----[ 3.2.3 - Integrity checks on the header.
 
-The last step for our malloc() before returning a block back to the program
-is to prepend a header for tracking some minimal information for the block.
+The last step before returning a block back to the program is to prepend 
+a header for tracking some information for the block.
 
                          Block header
   -------------------------------------------------------------
@@ -662,7 +662,7 @@ is to prepend a header for tracking some minimal information for the block.
   | Checksum |  Offset  |   Size  | Origin |  State | ClassId |
   -------------------------------------------------------------
 
-A really good explaination for those fields can be found in the LLVM documentation:
+The explanation for those can be found in the LLVM documentation:
 
 * ClassId - "the class ID for that block, which identifies the region where
   the block resides for Primary backed allocations, or 0 for Secondary backed
