@@ -887,8 +887,8 @@ QuarantineCache contents;
 
 When calling free() API, quarantineOrDeallocateChunk() method will
 be called internally, which will firstly do some checks if it should
-place the chunk on quarantine or not (dah!). The following code snippet
-is the part that is executed when it has figured to quarantine the chunk.
+quarantine the chunk or not (dah!). The following code snippet is the 
+part that is executed when it has figured to quarantine the chunk.
 
 ----------------------------------- combined.h -----------------------------------
 else {
@@ -901,12 +901,15 @@ else {
 }
 ----------------------------------------------------------------------------------
 
-It will call the put method of a GlobalQuarantine object.
-It fetches a QuarantineCache object pointer from the thread specific
-data region and passes it as the first argument on the function,
-second argument will be a QuarantineCallback object which is explained
-in the  following comment;
-
+The put method of a GlobalQuarantine object will be called with the 
+following arguments;
+~ A QuarantineCache object pointer from the thread specific
+  data region.
+~ A QuarantineCallback object. [*]
+~ Pointer to the to-be-quarantined-chunk.
+~ Size of the to-be-quarantined-chunk.
+  
+[*]:
 ---------------------------------- quarantine.h ----------------------------------
 
 // The callback interface is:
@@ -915,8 +918,6 @@ in the  following comment;
 // void Callback::deallocate(void *Ptr);
 ----------------------------------------------------------------------------------
 
-The pointer to the chunk that we are about to quarantine and it's size
-will be placed as third and fourth argument respectively.
 The put method will then do the following;
 
 ---------------------------------- quarantine.h ----------------------------------
@@ -927,8 +928,8 @@ void put(CacheT *C, Callback Cb, Node *Ptr, uptr Size) {
 }
 ----------------------------------------------------------------------------------
 
-enqueue function will essentially push the to-be-quarantined chunk pointer
-to the "delayed freelist" as it was called in the documentation.
+enqueue method will push the to-be-quarantined chunk pointer to the 
+"delayed freelist".
 
 ---------------------------------- quarantine.h ----------------------------------
 
@@ -946,13 +947,13 @@ void enqueue(Callback Cb, void *Ptr, uptr Size) {
 }
 ----------------------------------------------------------------------------------
 
-If the linked list of QuarantineBatch is empty or the last QuarantineBatch
+If the linked list of QuarantineBatches is empty or the last QuarantineBatch
 object in the List is full, it will create a new one that its buffer
 is allocated like a normal chunk and initialize it by placing our
-to-be-quarantined-chunk pointer in the *Batch[] and setting the
+to-be-quarantined-chunk pointer in the *Batch[]. it will then set the
 Count & Size variables to the appropriate value.
-Lastly it enqueues B to the List and update the Size variable
-of the QuarantineCache object.
+Lastly it enqueues the new QuarantineBatch to the List and update the 
+Size variable of the QuarantineCache object.
 
 On the other hand, it will just be stored in the *Batch[] of the last List
 node and update the Count & Size of the object.
@@ -973,10 +974,9 @@ void put(CacheT *C, Callback Cb, Node *Ptr, uptr Size) {
 }
 ----------------------------------------------------------------------------------
 
-This if statement is essentially checking if the total memory used
-including internal accounting has exceeded MaxCacheSize.
-If it has, call drain. Which will merge the thread local QuarantineCache
-object to the GlobalQuarantine's QuarantineCache object;
+This if statement is checking if the total memory used (including internal accounting)
+has exceeded MaxCacheSize. If it has, call drain. Which will merge the thread local 
+QuarantineCache object to the GlobalQuarantine's QuarantineCache object;
 
 ---------------------------------- quarantine.h ----------------------------------
 
@@ -991,8 +991,7 @@ void NOINLINE drain(CacheT *C, Callback Cb) {
 ----------------------------------------------------------------------------------
 
 Lastly it makes sure that the GlobalQuarantine's QuarantineCache object
-hasn't exceeded a limit, which is different than the one in
-put function.
+hasn't exceeded a limit, which is different than the one in put function.
 
 If it has surpassed it, call recycle() which is the function
 responsible for giving quarantined chunks a chance to escape;
@@ -1027,8 +1026,8 @@ void NOINLINE recycle(uptr MinSize, Callback Cb) {
 ----------------------------------------------------------------------------------
 
 The if statement tries to guess if it's likely to find batches suitable
-for merge in this QuarantineBatch List. If it is, call mergeBatches() which
-will try merging batches to save up some memory.
+for merge in this QuarantineBatch List. If it is, call mergeBatches() 
+which will try merging batches to save up some memory.
 
 The last call will be to doRecycle() which will unquarantine the nodes
 that exist in Tmp's List in random order.
