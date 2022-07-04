@@ -74,8 +74,8 @@
     }
     ----------------------------------------------------------------------------------
 
-    Since Count is set to 0 that means that even though this QuarantineBatch is
-    enqueued in ToDeallocate, which will be used later in doRecycle, it will just
+    Since Count is set to 0, it means that even though this QuarantineBatch is
+    enqueued in ToDeallocate (which will be used later in doRecycle) it will just
     get deallocated and none of its nodes will get recycled;
 
     ---------------------------------- quarantine.h ----------------------------------
@@ -100,13 +100,14 @@
     So the same chunk may exist on 2 QuarantineBatch structures at the same time.
 
     The problem of course is that we need to fix the Count variable so that it
-    includes the chunk we want to return twice. Moreover when it is returned the
-    first time we should fix its header too to make it look it's quarantined again
+    includes the chunk we want to return twice. And lastly when it is returned the
+    first time we should fix its header to make it look it's quarantined again
     so the program doesn't abort.
 
 
     We need to set up the QuarantineBatches in such a way that the following loop
-    in recycle(uptr MinSize, Callback Cb) doesn't enqueue both QuarantineBatches;
+    in recycle(uptr MinSize, Callback Cb) doesn't enqueue both QuarantineBatches
+    with the same chunk;
 
     ---------------------------------- quarantine.h ----------------------------------
 
@@ -117,11 +118,10 @@
       Tmp.enqueueBatch(Cache.dequeueBatch());
     ----------------------------------------------------------------------------------
 
-    If both of them get enqueued we won't be able to fix the header of the chunk
-    after it gets recycled the first time and scudo will abort when trying to return
-    it for the second time.
-    To bypass that some QuarantineBatch feng shui is essential.
-    Here is a pattern that will do the job (each block represents a QuarantineBatch structure);
+    If both of them get enqueued we won't be able to fix its header after it gets recycled 
+    the first time and scudo will abort when trying to return it for the second time.
+    To bypass that, some QuarantineBatch feng shui is mandatory.
+    Here is a feng shui structure that will do the job;
 
     The pattern can be found [<a href=https://github.com/un1fuzz/scudo_research/blob/main/quarantine_double_return_pattern.txt target="_blank">here</a>]
 
@@ -130,7 +130,7 @@
 
     <span id="a2_2"></span>---[ 2.2 - Practice
 
-    Here I will drop a small commented POC for this technique.
+    Here I will drop a small commented PoC for this technique.
 
     -------------------------------------- poc.c --------------------------------------
 
@@ -192,7 +192,6 @@
 
     }
     int main(){
-    	//printf("PID: %ld\n\n", (long)getpid());
     	// scudo allocator 101 ;)
     	size_t *y, *z;
     	u_int32_t cksum_inuse, returned_once = 0;
