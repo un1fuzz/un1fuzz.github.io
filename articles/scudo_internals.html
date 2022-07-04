@@ -128,9 +128,8 @@ scudo allocation/deallocation operation. On the linux platform scudo is not
 hardwired with the libc by default and so it requires you to link scudo in some
 way prior to running a program.
 
-For our testing we compiled the standalone scudo library [2] for linux and used
-the RPATH property to load scudo on our testbeds. But other better/dirty solutions
-can be found.
+For our testing we compiled the standalone scudo library for linux and used the
+RPATH property to load scudo on our testbeds.
 
 By linking scudo on a program, the initialization of the heap will take place on
 the first allocation/deallocation operation. The start of the initialization
@@ -169,9 +168,8 @@ void init() {
 }
 ----------------------------------------------------------------------------------
 
-At this point scudo will try to read a random 32 bit integer from /dev/urandom
-(if possible) to be used as a Cookie which will be later used by the allocator
-when it needs a secure source of randomness.
+A 32 bit integer will be read from /dev/urandom to be used as a
+secure source of randomness where it's needed.
 
 Next scudo will try to read flags, from the config file in flags.inc,
 from the program by calling __scudo_default_options (if present) and finally
