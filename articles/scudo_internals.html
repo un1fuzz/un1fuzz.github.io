@@ -239,7 +239,7 @@ as well as for deriving RandStates for each Region.
 Finally, it can be configured that the start of each Region will be randomized 
 by an offset of [1, 16] * PageSize, to make it harder for an attacker to guess 
 their location, but also to introduce guard pages between them. 
-Those gaps between each regions are reserved unreadable & unwritable. 
+Those gaps between each region are reserved unreadable & unwritable. 
 With this trick, huge heap overflows could be prevented.
 
    Start of the heap.
