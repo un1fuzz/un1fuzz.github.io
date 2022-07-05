@@ -49,17 +49,17 @@
 
 In this blog post we publish our research on the scudo allocator. There are
 some other blogs which detail some parts of the scudo, but we couldn't
-find any good resource in english so here we are.
+find any good resource in English so here we are.
 
 We hope that our article will be useful for future researchers who are
-interested on this allocator.
+interested in this allocator.
 
 Scudo is already deployed on Android 11 and Fuchsia as a replacement for their
 userland memory allocators, but it's developed as a part of LLVM and can be used
 on most operating systems. As described in the LLVM docs, scudo's design aims to
 mitigate a lot of heap related exploitable situations while maintaining good
 performance. It's not designed to completely protect the heap from any sort of
-attack but it does a decent job to mitigate a lot of heap related exploitable
+attack but it does a decent job mitigating a lot of heap related exploitable
 situations.
 
 In this research we only experimented with the standalone scudo deployed on a
@@ -122,7 +122,7 @@ to allocate space on that region for storing user data.
 
 <span id="a3_1"></span>---[ 3.1 - The birth of the heap.
 
-Depending how it is bundled with the standard libc/c++ library on a given
+Depending how it is bundled with the standard libc/C++ library on a given
 platform, scudo might be initialized either during startup or during the first
 scudo allocation operation. On the linux platform scudo is not hardwired with 
 the glibc by default and so it requires you to link scudo in some way before
@@ -213,13 +213,8 @@ void init(s32 ReleaseToOsInterval) {
 }
 ----------------------------------------------------------------------------------
 
-At this point the entire heap for the primary allocator will be pre-mapped by
-calling map(...) which will later on call mmap on linux platforms. Scudo will ask
-from the kernel to only reserve a mapping on the VA space and not to actually
-allocate it all at once. The start of the heap relies on the ASLR of the system.
-The size of PrimarySize is constant but slightly differs from platform to
-platform and is configuration dependent. This mapping will be divided into
-a number of equal sized Regions.
+The entire heap for the primary allocator will be pre-mapped.
+This new mapping will be divided into a number of equal sized Regions.
 
   ...
   static const uptr RegionSize = 1UL << Config::PrimaryRegionSizeLog;
@@ -335,8 +330,8 @@ We will focus only on the Primary.
 The next thing that needs to be resolved is which region shall service the
 request. Each region is representing a class and hence is given a ClassId.
 Each one of them is cut into equal sized blocks. For this reason, a region
-is expected to service a range of allocation sizes and like other allocators,
-it might return to you more space than what you requested.
+is expected to service a range of allocation sizes.
+As a result, it might return to you more space than what you requested.
 
 The sizes each region services is platform dependent.
 Here is a table for the first 6 regions:
