@@ -861,8 +861,7 @@ QuarantineBatch contents;
   this batch + sizeof(QuarantineBatch).
   So even if Batch array is empty the
   Size must be equal to sizeof(QuarantineBatch).
-~ A Count variable which will be a counter of how many nodes
-  have been stored in *Batch[].
+~ Count: how many nodes have been stored in *Batch[].
 ~ Lastly we have the Batch array that is responsible for holding
   the pointers of the quarantined chunks.
 
