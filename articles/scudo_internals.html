@@ -430,9 +430,8 @@ following structure.
     };
   ...
 
-So returning back to allocate(), if the cache is not empty by simply checking
-if the Count field of the corresponding PerClass entry is not zero, scudo
-will "decompact" the last free block pointer stored in the PerClass entry and
+So returning back to allocate(), if the cache is not empty, scudo will 
+"decompact" the last free block pointer stored in the PerClass entry and
 return it back to the program.
 
 - Compact pointers are just offsets from the start of a region shifted by a
