@@ -100,14 +100,14 @@
     So the same chunk may exist on 2 QuarantineBatch structures at the same time.
 
     The problem of course is that we need to fix the Count variable so that it
-    includes the chunk we want to return twice. And lastly when it is returned the
-    first time we should fix its header to make it look it's quarantined again
+    includes the chunk we want to return twice. And lastly, when it is returned
+    the first time we should fix its header to make it look it's quarantined again
     so the program doesn't abort.
 
 
-    We need to set up the QuarantineBatches in such a way that the following loop
-    in recycle(uptr MinSize, Callback Cb) doesn't enqueue both QuarantineBatches
-    with the same chunk;
+    We need to set up the QuarantineBatches in such a way that the following 
+    loop in recycle(uptr MinSize, Callback Cb) doesn't enqueue both the target 
+    QuarantineBatches at the same time;
 
     ---------------------------------- quarantine.h ----------------------------------
 
