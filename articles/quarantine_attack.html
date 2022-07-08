@@ -323,7 +323,7 @@
     ----------------------------------------------------------------------------------
 
     We can see that the Count field of a QuarantineBatch is an unsigned 32 bit
-    integer. If we were able to corrupt the Count field of the Last QurantineBatch
+    integer. If we were able to corrupt the Count field of the Last QuarantineBatch
     on the QuarantineCache we would have crafted a Write-Where-Ptr primitive
     inside push_back()!
 
